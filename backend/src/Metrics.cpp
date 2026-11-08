@@ -11,7 +11,6 @@ SimulationMetrics MetricsCalculator::calculate(
 ){
     SimulationMetrics metrics;
     metrics.algorithmName = algoName;
-    metrics.processedPatients = patients;
     metrics.timeline = timeline;
     metrics.totalSimulationTime = totalTime;
 
@@ -41,6 +40,7 @@ SimulationMetrics MetricsCalculator::calculate(
         }
     }
 
+    metrics.processedPatients = patients;
     metrics.avgWaitingTime = totalWT / patients.size();
     metrics.avgTurnaroundTime = totalTAT / patients.size();
     metrics.avgResponseTime = totalRT / patients.size();
