@@ -8,10 +8,10 @@ struct Patient {
     int remainingTime;    
     int priority_level;   // 1(Highest Urgency) to 5(lowest) 
 
-    int firstStartTime;
-    int completionTime;
-    int waitingTime;
-    int responseTime;
+    int firstStartTime = -1;
+    int completionTime = 0;
+    int waitingTime = 0;
+    int turnaroundTime = 0;
 
     Patient(int p_id , int arrival , int treatment, int priority){
         id = p_id;
