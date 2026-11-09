@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
 
 const algorithms = [
-  { value: "FCFS", abbreviation: "FCFS", label: "First Come, First Served", description: "Treats patients in arrival order without interruption." },
-  { value: "SJF", abbreviation: "SJF", label: "Shortest Job First", description: "Treats the patient with the shortest burst next; non-preemptive." },
-  { value: "SRTF", abbreviation: "SRTF", label: "Shortest Remaining Time First", description: "Can switch to the patient with the shortest remaining burst." },
-  { value: "Priority", abbreviation: "Priority", label: "Priority Scheduling", description: "Treats the highest-priority patient next; non-preemptive." },
-  { value: "PreemptivePriority", abbreviation: "Preemptive Priority", label: "Preemptive Priority Scheduling", description: "Can switch when a higher-priority patient arrives." },
-  { value: "RR", abbreviation: "RR", label: "Round Robin", description: "Cycles through patients using a fixed time quantum." },
+  { value: "FCFS", abbreviation: "FCFS", label: "First Come, First Served" },
+  { value: "SJF", abbreviation: "SJF", label: "Shortest Job First" },
+  { value: "SRTF", abbreviation: "SRTF", label: "Shortest Remaining Time First" },
+  { value: "Priority", abbreviation: "Priority", label: "Priority Scheduling" },
+  { value: "PreemptivePriority", abbreviation: "Preemptive Priority", label: "Preemptive Priority Scheduling" },
+  { value: "RR", abbreviation: "RR", label: "Round Robin" },
 ];
 
 const metricDefinitions = [
@@ -54,8 +54,17 @@ function App() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const selectedAlgorithm = algorithms.find(({ value }) => value === algorithm);
-  const timelineEnd = result?.timeline?.at(-1)?.endTime ?? 0;
+  const timelineEnd = Math.max(
+    0,
+    ...(result?.timeline ?? []).map((slot) => slot.endTime),
+  );
+  const timelineTicks = Array.from(
+    new Set(
+      Array.from({ length: 5 }, (_, index) =>
+        Math.round((timelineEnd * index) / 4),
+      ),
+    ),
+  );
 
   const chartSlots = useMemo(() => {
     const timeline = [...(result?.timeline ?? [])].sort(
@@ -86,7 +95,14 @@ function App() {
   }, [result]);
 
   function changePatientCount(event) {
-    const nextCount = Math.min(20, Math.max(1, Number(event.target.value) || 1));
+    const rawValue = event.target.value;
+    if (rawValue === "") {
+      setPatientCount("");
+      setResult(null);
+      return;
+    }
+
+    const nextCount = Math.min(20, Math.max(0, Number(rawValue) || 0));
     setPatientCount(nextCount);
     setPatients((current) =>
       Array.from({ length: nextCount }, (_, index) => current[index] ?? defaultPatient(index + 1)),
@@ -95,20 +111,52 @@ function App() {
   }
 
   function updatePatient(index, field, value) {
+    const nextValue = value === "" ? "" : Number(value);
     setPatients((current) =>
       current.map((patient, patientIndex) =>
         patientIndex === index
-          ? { ...patient, [field]: Number(value) }
+          ? { ...patient, [field]: nextValue }
           : patient,
       ),
     );
     setResult(null);
   }
 
+  function normalizePatientField(index, field) {
+    setPatients((current) =>
+      current.map((patient, patientIndex) =>
+        patientIndex === index && patient[field] === ""
+          ? { ...patient, [field]: 0 }
+          : patient,
+      ),
+    );
+  }
+
+  function normalizePatientCount() {
+    if (patientCount === "") {
+      setPatientCount(0);
+      setPatients([]);
+    }
+  }
+
+  function resetSimulation() {
+    setPatientCount(3);
+    setPatients(Array.from({ length: 3 }, (_, index) => defaultPatient(index + 1)));
+    setAlgorithm("FCFS");
+    setQuantum(2);
+    setResult(null);
+    setError("");
+  }
+
   async function runSchedule(event) {
     event.preventDefault();
     setError("");
     setResult(null);
+
+    if (!Number.isInteger(patientCount) || patientCount < 1) {
+      setError("Number of patients must be at least 1.");
+      return;
+    }
 
     const invalidPatient = patients.find((patient) =>
       ["arrivalTime", "treatmentTime", "priority"].some(
@@ -171,10 +219,42 @@ function App() {
             <p className="eyebrow">Emergency department operations</p>
             <h1>ED Scheduler</h1>
             <p className="subtitle">Operating Systems Scheduling Simulator</p>
-            <p className="intro">
-              Compare scheduling policies against the same patient workload.
-            </p>
           </div>
+        </div>
+        <div className="header-controls">
+          <label className="policy-control" htmlFor="algorithm">
+            <span>Scheduling policy</span>
+            <select
+              id="algorithm"
+              value={algorithm}
+              onChange={(event) => {
+                setAlgorithm(event.target.value);
+                setError("");
+              }}
+            >
+              {algorithms.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.abbreviation} — {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {algorithm === "RR" && (
+            <label className={`quantum-control${getQuantumError(quantum) ? " has-error" : ""}`} htmlFor="quantum">
+              <span>Quantum <small>(time units)</small></span>
+              <input
+                id="quantum"
+                type="number"
+                min="1"
+                value={quantum}
+                onChange={(event) => setQuantum(event.target.value)}
+                onKeyDown={preventNumberStepping}
+                aria-invalid={Boolean(getQuantumError(quantum))}
+                aria-describedby={getQuantumError(quantum) ? "quantum-error" : undefined}
+              />
+              {getQuantumError(quantum) && <span className="field-error" id="quantum-error">{getQuantumError(quantum)}</span>}
+            </label>
+          )}
         </div>
       </header>
 
@@ -182,10 +262,10 @@ function App() {
         <section className="panel setup-panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">01 / Workload</p>
+              <p className="eyebrow">01 / Incoming Patients</p>
               <h2>Patient details</h2>
             </div>
-            <label className="count-control">
+            <label className={`count-control${patientCount === 0 ? " has-error" : ""}`}>
               <span>Number of patients</span>
               <input
                 type="number"
@@ -193,8 +273,13 @@ function App() {
                 max="20"
                 value={patientCount}
                 onChange={changePatientCount}
+                onBlur={normalizePatientCount}
+                onKeyDown={preventNumberStepping}
                 aria-label="Number of patients"
+                aria-invalid={patientCount === 0}
+                aria-describedby={patientCount === 0 ? "patient-count-error" : undefined}
               />
+              {patientCount === 0 && <span className="count-error" id="patient-count-error">Enter 1–20.</span>}
             </label>
           </div>
 
@@ -219,6 +304,7 @@ function App() {
                   value={patient.arrivalTime}
                   error={getPatientFieldError(patient, "arrivalTime")}
                   onChange={(event) => updatePatient(index, "arrivalTime", event.target.value)}
+                  onBlur={() => normalizePatientField(index, "arrivalTime")}
                 />
                 <PatientField
                   id={`patient-${patient.id}-treatment`}
@@ -228,6 +314,7 @@ function App() {
                   value={patient.treatmentTime}
                   error={getPatientFieldError(patient, "treatmentTime")}
                   onChange={(event) => updatePatient(index, "treatmentTime", event.target.value)}
+                  onBlur={() => normalizePatientField(index, "treatmentTime")}
                 />
                 <PatientField
                   id={`patient-${patient.id}-priority`}
@@ -238,74 +325,23 @@ function App() {
                   value={patient.priority}
                   error={getPatientFieldError(patient, "priority")}
                   onChange={(event) => updatePatient(index, "priority", event.target.value)}
+                  onBlur={() => normalizePatientField(index, "priority")}
                 />
               </div>
             ))}
           </div>
-          <p className="helper-text">
-            One doctor treats patients in order of the selected policy. Arrival and treatment values use simulator time units; priority 1 is most urgent.
-          </p>
-        </section>
-
-        <section className="panel options-panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">02 / Policy</p>
-              <h2>Scheduling algorithm</h2>
+          <div className="simulation-toolbar">
+            <div className="toolbar-context">Ready to simulate with the selected policy.</div>
+            <div className="toolbar-actions">
+              <button className="run-button" type="submit" disabled={isLoading} aria-busy={isLoading}>
+                {isLoading && <span className="button-spinner" aria-hidden="true" />}
+                <span>{isLoading ? "Running simulation..." : "Run simulation"}</span>
+              </button>
+              <button className="reset-button" type="button" onClick={resetSimulation} disabled={isLoading}>
+                Reset
+              </button>
             </div>
           </div>
-          <fieldset className="algorithm-options">
-            <legend>Choose a scheduling policy</legend>
-            <div className="algorithm-grid">
-              {algorithms.map((option) => (
-                <label
-                  className={`algorithm-card${algorithm === option.value ? " selected" : ""}`}
-                  key={option.value}
-                >
-                  <input
-                    type="radio"
-                    name="algorithm"
-                    value={option.value}
-                    checked={algorithm === option.value}
-                    onChange={(event) => {
-                      setAlgorithm(event.target.value);
-                      setError("");
-                    }}
-                  />
-                  <span className="algorithm-card-content">
-                    <span className="algorithm-card-title">
-                      <strong>{option.abbreviation}</strong>
-                      <span>{option.label}</span>
-                    </span>
-                    <small>{option.description}</small>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-          {algorithm === "RR" && (
-            <label className={`field-label quantum-field${getQuantumError(quantum) ? " has-error" : ""}`} htmlFor="quantum">
-              <span>Time quantum <small>(time units per turn)</small></span>
-              <input
-                id="quantum"
-                type="number"
-                min="1"
-                value={quantum}
-                onChange={(event) => setQuantum(event.target.value)}
-                aria-invalid={Boolean(getQuantumError(quantum))}
-                aria-describedby={getQuantumError(quantum) ? "quantum-error" : undefined}
-              />
-              {getQuantumError(quantum) && <span className="field-error" id="quantum-error">{getQuantumError(quantum)}</span>}
-            </label>
-          )}
-          <div className="selection-note">
-            <span className="status-dot" />
-            Selected: {selectedAlgorithm?.abbreviation}
-          </div>
-          <button className="run-button" type="submit" disabled={isLoading}>
-            {isLoading && <span className="button-spinner" aria-hidden="true" />}
-            <span>{isLoading ? "Running simulation..." : "Run simulation"}</span>
-          </button>
           {error && <p className="error-message" role="alert" aria-live="assertive">{error}</p>}
         </section>
       </form>
@@ -342,11 +378,16 @@ function App() {
               </div>
             </div>
             <div className="results-table-wrap">
-              <table className="results-table">
+              {result.processedPatients?.length ? (
+                <table className="results-table">
+                  <caption className="sr-only">Per-patient scheduling results</caption>
                 <thead>
                   <tr>
                     <th>Patient</th>
                     <th>Arrival</th>
+                    <th>Treatment</th>
+                    <th>Priority</th>
+                    <th>First start</th>
                     <th>Completion</th>
                     <th>Waiting</th>
                     <th>Turnaround</th>
@@ -358,16 +399,25 @@ function App() {
                     .sort((left, right) => left.id - right.id)
                     .map((patient) => (
                       <tr key={patient.id}>
-                        <th scope="row">P{patient.id}</th>
-                        <td>{patient.arrivalTime}</td>
-                        <td>{patient.completionTime}</td>
-                        <td>{formatMetric(patient.waitingTime)}</td>
-                        <td>{formatMetric(patient.turnaroundTime)}</td>
-                        <td>{formatMetric(patient.firstStartTime - patient.arrivalTime)}</td>
+                        <th scope="row">{formatPatientId(patient.id)}</th>
+                        <td>{formatTableValue(patient.arrivalTime)}</td>
+                        <td>{formatTableValue(patient.treatmentTime)}</td>
+                        <td>{formatTableValue(patient.priority)}</td>
+                        <td>{formatTableValue(patient.firstStartTime)}</td>
+                        <td>{formatTableValue(patient.completionTime)}</td>
+                        <td>{formatTableValue(patient.waitingTime)}</td>
+                        <td>{formatTableValue(patient.turnaroundTime)}</td>
+                        <td>{formatTableValue(getResponseTime(patient))}</td>
                       </tr>
                     ))}
                 </tbody>
-              </table>
+                </table>
+              ) : (
+                <div className="table-empty-state">
+                  <strong>No patient results available</strong>
+                  <span>Run a simulation with at least one patient to populate this table.</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -375,33 +425,52 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Timeline</p>
-                <h2>Gantt chart</h2>
+                <h2>Doctor treatment timeline</h2>
               </div>
               <span className="timeline-total">0 — {timelineEnd} time units</span>
             </div>
-            <div className="gantt-chart">
-              {chartSlots.map((slot) => (
-                <div
-                  className="gantt-slot"
-                  data-idle={slot.patientId === null}
-                  key={slot.key}
-                  style={{ flexGrow: slot.width }}
-                  title={`${slot.patientId === null ? "Idle" : `P${slot.patientId}`}: ${slot.startTime} to ${slot.endTime}`}
-                >
-                  <strong>{slot.patientId === null ? "Idle" : `P${slot.patientId}`}</strong>
-                  <span>{slot.startTime}–{slot.endTime}</span>
-                </div>
-              ))}
-            </div>
-            <div className="time-axis">
-              <span>0</span>
-              <span>{timelineEnd}</span>
+            <p className="chart-helper">
+              One lane represents the single doctor. Repeated patient labels show preemption or time-sliced treatment.
+            </p>
+            <div className="gantt-scroll">
+              <div
+                className="gantt-chart"
+                role="list"
+                aria-label={`Doctor treatment timeline from 0 to ${timelineEnd} time units`}
+                style={{ minWidth: `${Math.max(620, chartSlots.length * 76)}px` }}
+              >
+                {chartSlots.map((slot) => {
+                  const duration = slot.endTime - slot.startTime;
+                  const patientLabel = slot.patientId === null ? "Idle" : `Patient P${slot.patientId}`;
+                  return (
+                    <div
+                      className="gantt-slot"
+                      data-idle={slot.patientId === null}
+                      key={slot.key}
+                      role="listitem"
+                      style={{ flexGrow: slot.width }}
+                      title={`${patientLabel}: ${slot.startTime} to ${slot.endTime} (${duration} time units)`}
+                      aria-label={`${patientLabel}, start ${slot.startTime}, end ${slot.endTime}, duration ${duration} time units`}
+                    >
+                      <strong>{slot.patientId === null ? "Idle" : `P${slot.patientId}`}</strong>
+                      <span>{slot.startTime}–{slot.endTime}</span>
+                      <small>{duration} unit{duration === 1 ? "" : "s"}</small>
+                    </div>
+                  );
+                })}
+              </div>
+              <div
+                className="time-axis"
+                style={{ gridTemplateColumns: `repeat(${Math.max(timelineTicks.length, 1)}, minmax(0, 1fr))` }}
+              >
+                {timelineTicks.map((tick) => <span key={tick}>{tick}</span>)}
+              </div>
             </div>
           </div>
         </section>
       ) : (
         <section className="empty-results">
-          <span className="empty-icon">↗</span>
+          <span className="empty-icon" aria-hidden="true">↗</span>
           <div>
             <h2>Your schedule will appear here</h2>
             <p>Enter your patients, select a scheduling algorithm, and run the simulation to see performance metrics and the treatment timeline.</p>
@@ -427,7 +496,22 @@ function isMetricAvailable(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function PatientField({ id, label, hint, min, max, value, error, onChange }) {
+function formatPatientId(value) {
+  return isMetricAvailable(value) ? `P${value}` : "—";
+}
+
+function formatTableValue(value) {
+  return isMetricAvailable(value) ? formatMetric(value) : "—";
+}
+
+function getResponseTime(patient) {
+  if (!isMetricAvailable(patient.firstStartTime) || !isMetricAvailable(patient.arrivalTime)) {
+    return null;
+  }
+  return patient.firstStartTime - patient.arrivalTime;
+}
+
+function PatientField({ id, label, hint, min, max, value, error, onChange, onBlur }) {
   return (
     <div className={`patient-field${error ? " has-error" : ""}`}>
       <label htmlFor={id}>
@@ -440,12 +524,20 @@ function PatientField({ id, label, hint, min, max, value, error, onChange }) {
         max={max}
         value={value}
         onChange={onChange}
+        onBlur={onBlur}
+        onKeyDown={preventNumberStepping}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? `${id}-error` : undefined}
       />
       {error && <span className="field-error" id={`${id}-error`}>{error}</span>}
     </div>
   );
+}
+
+function preventNumberStepping(event) {
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    event.preventDefault();
+  }
 }
 
 function getPatientFieldError(patient, field) {
