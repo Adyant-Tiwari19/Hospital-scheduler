@@ -16,4 +16,35 @@ public:
     SimulationMetrics run(vector<Patient> inputPatients) override;
 };
 
+class NonPreemptiveSFJScheduler : public Scheduler {
+public:
+    SimulationMetrics run(vector<Patient> inputPatients) override;
+};
+
+class PreemptiveSRTFScheduer : public Scheduler {
+public:
+    SimulationMetrics run(vector<Patient> inputPatients) override;
+};
+
+class PreemptivePriorityScheduler : public Scheduler {
+public:
+    SimulationMetrics run(vector<Patient> inputPatients) override;
+};
+
+class NonPreemptivePriorityScheduler : public Scheduler {
+public:
+    SimulationMetrics run(vector<Patient> inputPatients) override;
+};
+
+class RobinRoundScheduler : public Scheduler {
+
+private:
+    int timeQuantum;
+public:
+    RobinRoundScheduler(int quantum = 2){
+        timeQuantum = quantum;
+    }
+    SimulationMetrics run(vector<Patient> inputPatients) override;
+};
+
 #endif
