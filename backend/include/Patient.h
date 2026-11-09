@@ -17,6 +17,7 @@ struct Patient {
         id = p_id;
         arrivalTime = arrival;
         treatmentTime = treatment;
+        remainingTime = treatment;
         priority_level = priority;
     }
 };

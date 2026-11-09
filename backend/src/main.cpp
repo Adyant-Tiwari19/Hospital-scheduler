@@ -6,6 +6,7 @@
 #include "Scheduler.h"
 
 #include <string>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -53,9 +54,9 @@ crow::response openApiSpec() {
     "version": "1.0.0"
   },
   "paths": {
-    "/api/simulate": {
+    "/api/schedule": {
       "post": {
-        "summary": "Run the FCFS patient scheduling simulation",
+        "summary": "Run a patient scheduling algorithm",
         "requestBody": {
           "required": true,
           "content": {
@@ -98,8 +99,18 @@ crow::response openApiSpec() {
       },
       "SimulationRequest": {
         "type": "object",
-        "required": ["patients"],
+        "required": ["algorithm", "patients"],
         "properties": {
+          "algorithm": {
+            "type": "string",
+            "description": "FCFS=first-come first-served; SJF=non-preemptive shortest job first; SRTF=preemptive shortest remaining time first; Priority=non-preemptive priority; PreemptivePriority=preemptive priority; RR=round robin",
+            "enum": ["FCFS", "SJF", "SRTF", "Priority", "PreemptivePriority", "RR"]
+          },
+          "quantum": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 2
+          },
           "patients": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/PatientWorkload" }
@@ -152,17 +163,49 @@ crow::json::wvalue timelineJson(const std::vector<TimeSlot>& timeline) {
     return slots;
 }
 
-crow::response simulate(const crow::request& request) {
+crow::response schedule(const crow::request& request) {
     const auto body = crow::json::load(request.body);
-    if (!body || !body.has("patients")) {
-        return jsonError(400, "Request body must contain a patients array");
+    if (!body || !body.has("algorithm") || !body.has("patients")) {
+        return jsonError(400, "Request body must contain algorithm and patients");
     }
 
-    const auto patientsJson = body["patients"];
-    if (patientsJson.t() != crow::json::type::List) {
+    if (body["algorithm"].t() != crow::json::type::String) {
+        return jsonError(400, "algorithm must be a string");
+    }
+
+    const std::string algorithm = body["algorithm"].s();
+    std::unique_ptr<Scheduler> scheduler;
+    if (algorithm == "FCFS") {
+        scheduler = std::make_unique<FCFSScheduler>();
+    } else if (algorithm == "SJF") {
+        scheduler = std::make_unique<NonPreemptiveSFJScheduler>();
+    } else if (algorithm == "SRTF") {
+        scheduler = std::make_unique<PreemptiveSRTFScheduer>();
+    } else if (algorithm == "Priority") {
+        scheduler = std::make_unique<NonPreemptivePriorityScheduler>();
+    } else if (algorithm == "PreemptivePriority") {
+        scheduler = std::make_unique<PreemptivePriorityScheduler>();
+    } else if (algorithm == "RR") {
+        int quantum = 2;
+        if (body.has("quantum")) {
+            if (body["quantum"].t() != crow::json::type::Number) {
+                return jsonError(400, "quantum must be an integer");
+            }
+            quantum = body["quantum"].i();
+        }
+        if (quantum <= 0) {
+            return jsonError(400, "quantum must be greater than zero");
+        }
+        scheduler = std::make_unique<RobinRoundScheduler>(quantum);
+    } else {
+        return jsonError(400, "Unsupported algorithm");
+    }
+
+    if (body["patients"].t() != crow::json::type::List) {
         return jsonError(400, "patients must be an array");
     }
 
+    const auto patientsJson = body["patients"];
     std::vector<Patient> patients;
     patients.reserve(patientsJson.size());
 
@@ -185,8 +228,7 @@ crow::response simulate(const crow::request& request) {
         patients.emplace_back(id, arrivalTime, treatmentTime, priority);
     }
 
-    FCFSScheduler scheduler;
-    const SimulationMetrics metrics = scheduler.run(std::move(patients));
+    const SimulationMetrics metrics = scheduler->run(std::move(patients));
 
     crow::json::wvalue response;
     response["metrics"]["algorithmName"] = metrics.algorithmName;
@@ -215,8 +257,8 @@ int main() {
 
     CROW_ROUTE(app, "/swagger").methods(crow::HTTPMethod::GET)(swaggerUi);
     CROW_ROUTE(app, "/openapi.json").methods(crow::HTTPMethod::GET)(openApiSpec);
-    CROW_ROUTE(app, "/api/simulate")
-        .methods(crow::HTTPMethod::POST)(simulate);
+    CROW_ROUTE(app, "/api/schedule")
+        .methods(crow::HTTPMethod::POST)(schedule);
 
     app.port(18080).multithreaded().run();
     return 0;

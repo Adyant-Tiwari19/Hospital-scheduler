@@ -86,11 +86,14 @@ SimulationMetrics PreemptivePriorityScheduler::run(vector<Patient> patients){
 
         if (p.id != lastPatientId){
             if (lastPatientId != -1){
-                timeline.push_back({slotStartTime , currentTime , p.id});
+                timeline.push_back({slotStartTime , currentTime , lastPatientId});
             }
             slotStartTime = currentTime;
             lastPatientId = p.id;
         }
+
+        p.remainingTime--;
+        currentTime++;
 
         if (p.remainingTime == 0){
             p.completionTime = currentTime;
