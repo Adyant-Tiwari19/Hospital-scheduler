@@ -1,563 +1,275 @@
-import { useMemo, useState } from "react";
+// App.jsx - owns the shared state and the two ways of talking to the backend:
+//   * "Run simulation"      -> ONE algorithm   (Simulate tab)
+//   * "Compare all"         -> ALL SIX at once (Compare tab)
+// The patient list, the chosen algorithm and the quantum live HERE so both tabs share them.
 
-const algorithms = [
-  { value: "FCFS", abbreviation: "FCFS", label: "First Come, First Served" },
-  { value: "SJF", abbreviation: "SJF", label: "Shortest Job First" },
-  { value: "SRTF", abbreviation: "SRTF", label: "Shortest Remaining Time First" },
-  { value: "Priority", abbreviation: "Priority", label: "Priority Scheduling" },
-  { value: "PreemptivePriority", abbreviation: "Preemptive Priority", label: "Preemptive Priority Scheduling" },
-  { value: "RR", abbreviation: "RR", label: "Round Robin" },
-];
-
-const metricDefinitions = [
-  {
-    key: "avgWaitingTime",
-    label: "Average waiting time",
-    unit: "time units",
-    description: "Average time before treatment starts.",
-  },
-  {
-    key: "avgTurnaroundTime",
-    label: "Average turnaround time",
-    unit: "time units",
-    description: "Average time from arrival to completion.",
-  },
-  {
-    key: "avgResponseTime",
-    label: "Average response time",
-    unit: "time units",
-    description: "Average time from arrival to first treatment.",
-  },
-  {
-    key: "doctorUtilization",
-    label: "Doctor utilization",
-    unit: "%",
-    description: "Share of the simulation spent treating patients.",
-  },
-];
-
-const defaultPatient = (id) => ({
-  id,
-  arrivalTime: id === 1 ? 0 : id - 1,
-  treatmentTime: 3,
-  priority: 3,
-});
+import { useState } from "react";
+import { postSchedule, runAllAlgorithms } from "./api";
+import { ALGORITHMS, EXAMPLE_PATIENTS, LIMITS } from "./constants";
+import ComparePanel from "./components/ComparePanel";
+import { Alert, AlgorithmPicker, LoadingSkeleton, QuantumField, Spinner } from "./components/Controls";
+import { Icon } from "./components/Icons";
+import PatientInput from "./components/PatientInput";
+import SimulationView from "./components/SimulationView";
+import { countInvalidFields, defaultPatient, getQuantumError, makeDefaultPatients, renumber } from "./utils";
 
 function App() {
-  const [patientCount, setPatientCount] = useState(3);
-  const [patients, setPatients] = useState(() =>
-    Array.from({ length: 3 }, (_, index) => defaultPatient(index + 1)),
-  );
+  // ----- shared inputs -----
+  const [patients, setPatients] = useState(() => makeDefaultPatients(3));
   const [algorithm, setAlgorithm] = useState("FCFS");
   const [quantum, setQuantum] = useState(2);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("simulate");
 
-  const timelineEnd = Math.max(
-    0,
-    ...(result?.timeline ?? []).map((slot) => slot.endTime),
-  );
-  const timelineTicks = Array.from(
-    new Set(
-      Array.from({ length: 5 }, (_, index) =>
-        Math.round((timelineEnd * index) / 4),
-      ),
-    ),
-  );
+  // ----- Simulate tab -----
+  const [single, setSingle] = useState(null); // { algorithm, quantum, data, inputKey }
+  const [isRunning, setIsRunning] = useState(false);
+  const [runError, setRunError] = useState("");
 
-  const chartSlots = useMemo(() => {
-    const timeline = [...(result?.timeline ?? [])].sort(
-      (left, right) => left.startTime - right.startTime,
-    );
-    const slots = [];
-    let cursor = 0;
+  // ----- Compare tab -----
+  const [comparison, setComparison] = useState(null); // { rows, workload, quantum, inputKey }
+  const [isComparing, setIsComparing] = useState(false);
+  const [compareError, setCompareError] = useState("");
+  const [inspectedKey, setInspectedKey] = useState(null);
 
-    timeline.forEach((slot, index) => {
-      if (slot.startTime > cursor) {
-        slots.push({
-          key: `idle-${cursor}-${slot.startTime}`,
-          startTime: cursor,
-          endTime: slot.startTime,
-          patientId: null,
-          width: slot.startTime - cursor,
-        });
-      }
-      slots.push({
-        ...slot,
-        key: `${slot.patientId}-${slot.startTime}-${index}`,
-        width: Math.max(slot.endTime - slot.startTime, 0),
-      });
-      cursor = Math.max(cursor, slot.endTime);
-    });
+  // A "key" is a text fingerprint of the inputs. If the fingerprint of the current
+  // inputs differs from the one saved with a result, that result is out of date.
+  // (Quantum only matters for Round Robin, so it is left out for other algorithms.)
+  const singleKey = JSON.stringify({ patients, algorithm, quantum: algorithm === "RR" ? Number(quantum) : null });
+  const compareKey = JSON.stringify({ patients, quantum: Number(quantum) });
+  const singleIsStale = single !== null && single.inputKey !== singleKey;
+  const compareIsStale = comparison !== null && comparison.inputKey !== compareKey;
 
-    return slots;
-  }, [result]);
+  const selectedAlgorithm = ALGORITHMS.find((item) => item.value === algorithm);
+  const quantumError = getQuantumError(quantum);
 
-  function changePatientCount(event) {
-    const rawValue = event.target.value;
-    if (rawValue === "") {
-      setPatientCount("");
-      setResult(null);
-      return;
-    }
-
-    const nextCount = Math.min(20, Math.max(0, Number(rawValue) || 0));
-    setPatientCount(nextCount);
-    setPatients((current) =>
-      Array.from({ length: nextCount }, (_, index) => current[index] ?? defaultPatient(index + 1)),
-    );
-    setResult(null);
-  }
-
+  // ----- patient list handlers -----
   function updatePatient(index, field, value) {
     const nextValue = value === "" ? "" : Number(value);
     setPatients((current) =>
-      current.map((patient, patientIndex) =>
-        patientIndex === index
-          ? { ...patient, [field]: nextValue }
-          : patient,
-      ),
+      current.map((patient, i) => (i === index ? { ...patient, [field]: nextValue } : patient)),
     );
-    setResult(null);
   }
 
-  function normalizePatientField(index, field) {
+  function addPatient() {
     setPatients((current) =>
-      current.map((patient, patientIndex) =>
-        patientIndex === index && patient[field] === ""
-          ? { ...patient, [field]: 0 }
-          : patient,
-      ),
+      current.length >= LIMITS.maxPatients ? current : [...current, defaultPatient(current.length + 1)],
     );
   }
 
-  function normalizePatientCount() {
-    if (patientCount === "") {
-      setPatientCount(0);
-      setPatients([]);
-    }
+  function removePatient(index) {
+    setPatients((current) => (current.length <= 1 ? current : renumber(current.filter((_, i) => i !== index))));
   }
 
-  function resetSimulation() {
-    setPatientCount(3);
-    setPatients(Array.from({ length: 3 }, (_, index) => defaultPatient(index + 1)));
+  function loadExample() {
+    setPatients(EXAMPLE_PATIENTS.map((patient) => ({ ...patient })));
+  }
+
+  function resetAll() {
+    setPatients(makeDefaultPatients(3));
     setAlgorithm("FCFS");
     setQuantum(2);
-    setResult(null);
-    setError("");
+    setSingle(null);
+    setRunError("");
+    setComparison(null);
+    setCompareError("");
+    setInspectedKey(null);
   }
 
-  async function runSchedule(event) {
-    event.preventDefault();
-    setError("");
-    setResult(null);
+  // Returns a message if the inputs cannot be sent yet, otherwise "".
+  function validateBeforeRun(needsQuantum) {
+    const invalid = countInvalidFields(patients);
+    if (invalid > 0) {
+      return `Fix the ${invalid} highlighted field${invalid === 1 ? "" : "s"} in the patient list first.`;
+    }
+    if (needsQuantum && quantumError) return `Round Robin quantum: ${quantumError}.`;
+    return "";
+  }
 
-    if (!Number.isInteger(patientCount) || patientCount < 1) {
-      setError("Number of patients must be at least 1.");
+  // ----- Simulate: one algorithm -----
+  async function runSimulation() {
+    setRunError("");
+    const problem = validateBeforeRun(algorithm === "RR");
+    if (problem) {
+      setRunError(problem);
       return;
     }
 
-    const invalidPatient = patients.find((patient) =>
-      ["arrivalTime", "treatmentTime", "priority"].some(
-        (field) => getPatientFieldError(patient, field),
-      ),
-    );
-    if (invalidPatient) {
-      setError(`Fix the highlighted fields for P${invalidPatient.id} before running the simulation.`);
-      return;
-    }
-
-    const quantumError = algorithm === "RR" ? getQuantumError(quantum) : "";
-    if (quantumError) {
-      setError(quantumError);
-      return;
-    }
-
-    setIsLoading(true);
-
+    const workload = patients.map((patient) => ({ ...patient }));
+    setIsRunning(true);
     try {
-      const response = await fetch("/api/schedule", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          algorithm,
-          ...(algorithm === "RR" ? { quantum: Number(quantum) } : {}),
-          patients,
-        }),
+      const data = await postSchedule(algorithm, quantum, workload);
+      setSingle({
+        algorithm: selectedAlgorithm,
+        quantum: Number(quantum),
+        data,
+        inputKey: singleKey,
       });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || "The scheduling request failed.");
-      }
-      setResult(payload);
-    } catch (requestError) {
-      setError(
-        requestError.message.includes("Failed to fetch")
-          ? "Unable to connect to the backend. Start the server on port 18080 and try again."
-          : requestError.message,
-      );
+    } catch (error) {
+      setRunError(error.message);
     } finally {
-      setIsLoading(false);
+      setIsRunning(false);
+    }
+  }
+
+  // ----- Compare: all six algorithms, same patients -----
+  async function runComparison() {
+    setCompareError("");
+    const problem = validateBeforeRun(true); // Round Robin is always part of a comparison
+    if (problem) {
+      setCompareError(problem);
+      return;
+    }
+
+    setIsComparing(true);
+    setInspectedKey(null);
+    try {
+      const { workload, rows } = await runAllAlgorithms(patients, quantum);
+      if (rows.every((row) => !row.ok)) {
+        // all six failed, so there is nothing to show
+        setComparison(null);
+        setCompareError(rows[0].error);
+      } else {
+        setComparison({ rows, workload, quantum: Number(quantum), inputKey: compareKey });
+      }
+    } catch (error) {
+      setCompareError(error.message);
+    } finally {
+      setIsComparing(false);
     }
   }
 
   return (
-    <main className="page-shell">
-      <header className="page-header">
-        <div className="header-content">
-          <div className="header-mark" aria-hidden="true">
-            <svg viewBox="0 0 48 48" role="presentation">
-              <circle className="doctor-hair" cx="24" cy="14" r="8" />
-              <circle className="doctor-face" cx="24" cy="17" r="6" />
-              <path className="doctor-coat" d="M12 40c1-8 5-12 12-12s11 4 12 12H12Z" />
-              <path className="doctor-stethoscope" d="M19 29v3c0 3 2 5 5 5s5-2 5-5v-1" />
-              <circle className="doctor-chest-piece" cx="29" cy="36" r="1.5" />
-            </svg>
-          </div>
+    <div className="app">
+      <header className="topbar">
+        <div className="topbar-inner">
+          <span className="logo" aria-hidden="true">
+            <Icon name="doctor" size={26} />
+          </span>
           <div>
-            <p className="eyebrow">Emergency department operations</p>
+            <p className="topbar-eyebrow">Emergency department operations</p>
             <h1>ED Scheduler</h1>
-            <p className="subtitle">Operating Systems Scheduling Simulator</p>
+            <p className="topbar-sub">Operating Systems CPU scheduling simulator · one doctor, many patients</p>
           </div>
-        </div>
-        <div className="header-controls">
-          <label className="policy-control" htmlFor="algorithm">
-            <span>Scheduling policy</span>
-            <select
-              id="algorithm"
-              value={algorithm}
-              onChange={(event) => {
-                setAlgorithm(event.target.value);
-                setError("");
-              }}
-            >
-              {algorithms.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.abbreviation} — {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {algorithm === "RR" && (
-            <label className={`quantum-control${getQuantumError(quantum) ? " has-error" : ""}`} htmlFor="quantum">
-              <span>Quantum <small>(time units)</small></span>
-              <input
-                id="quantum"
-                type="number"
-                min="1"
-                value={quantum}
-                onChange={(event) => setQuantum(event.target.value)}
-                onKeyDown={preventNumberStepping}
-                aria-invalid={Boolean(getQuantumError(quantum))}
-                aria-describedby={getQuantumError(quantum) ? "quantum-error" : undefined}
-              />
-              {getQuantumError(quantum) && <span className="field-error" id="quantum-error">{getQuantumError(quantum)}</span>}
-            </label>
-          )}
         </div>
       </header>
 
-      <form className="workspace" onSubmit={runSchedule}>
-        <section className="panel setup-panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">01 / Incoming Patients</p>
-              <h2>Patient details</h2>
-            </div>
-            <label className={`count-control${patientCount === 0 ? " has-error" : ""}`}>
-              <span>Number of patients</span>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                value={patientCount}
-                onChange={changePatientCount}
-                onBlur={normalizePatientCount}
-                onKeyDown={preventNumberStepping}
-                aria-label="Number of patients"
-                aria-invalid={patientCount === 0}
-                aria-describedby={patientCount === 0 ? "patient-count-error" : undefined}
+      <main className="page">
+        <PatientInput
+          patients={patients}
+          onUpdate={updatePatient}
+          onAdd={addPatient}
+          onRemove={removePatient}
+          onLoadExample={loadExample}
+          onReset={resetAll}
+        />
+
+        <div className="tabs" role="tablist" aria-label="Simulation mode">
+          <button
+            type="button"
+            role="tab"
+            id="tab-simulate"
+            aria-selected={activeTab === "simulate"}
+            aria-controls="panel-simulate"
+            className={`tab${activeTab === "simulate" ? " is-active" : ""}`}
+            onClick={() => setActiveTab("simulate")}
+          >
+            <Icon name="single" size={18} /> Simulate one algorithm
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-compare"
+            aria-selected={activeTab === "compare"}
+            aria-controls="panel-compare"
+            className={`tab${activeTab === "compare" ? " is-active" : ""}`}
+            onClick={() => setActiveTab("compare")}
+          >
+            <Icon name="compare" size={18} /> Compare algorithms
+          </button>
+        </div>
+
+        {activeTab === "simulate" && (
+          <div role="tabpanel" id="panel-simulate" aria-labelledby="tab-simulate" className="tab-panel">
+            <section className="panel" aria-labelledby="controls-heading">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Step 2</p>
+                  <h2 id="controls-heading">Choose a policy and run</h2>
+                  <p className="panel-sub">Study one algorithm in detail: metrics, timeline and every patient’s result.</p>
+                </div>
+              </div>
+
+              <AlgorithmPicker
+                value={algorithm}
+                onChange={(value) => {
+                  setAlgorithm(value);
+                  setRunError("");
+                }}
+                disabled={isRunning}
               />
-              {patientCount === 0 && <span className="count-error" id="patient-count-error">Enter 1–20.</span>}
-            </label>
-          </div>
 
-          <div className="patient-table">
-            <div className="table-row table-header" aria-hidden="true">
-              <span>Patient</span>
-              <span>Arrival time <small>(time units)</small></span>
-              <span>Treatment time <small>(time units)</small></span>
-              <span>Priority <small>(1–5)</small></span>
-            </div>
-            {patients.map((patient, index) => (
-              <div className="table-row patient-row" key={patient.id}>
-                <div className="patient-identity">
-                  <span>Patient</span>
-                  <strong>P{patient.id}</strong>
+              <div className="run-bar">
+                {algorithm === "RR" && <QuantumField id="single-quantum" value={quantum} onChange={setQuantum} />}
+                <p className="run-summary">
+                  <strong>{selectedAlgorithm.label}</strong> on {patients.length} patient
+                  {patients.length === 1 ? "" : "s"}
+                </p>
+                <button type="button" className="btn btn-primary" onClick={runSimulation} disabled={isRunning}>
+                  {isRunning ? <Spinner /> : <Icon name="play" size={16} />}
+                  {isRunning ? "Running simulation…" : "Run simulation"}
+                </button>
+              </div>
+
+              {runError && <Alert kind="error" title="Cannot run the simulation">{runError}</Alert>}
+            </section>
+
+            {isRunning && <LoadingSkeleton label="Running the simulation…" />}
+
+            {!isRunning && single && (
+              <>
+                {singleIsStale && (
+                  <Alert kind="warning" title="These results are out of date">
+                    The patients or the policy changed after this run. Press “Run simulation” to refresh.
+                  </Alert>
+                )}
+                <SimulationView algorithm={single.algorithm} quantum={single.quantum} data={single.data} />
+              </>
+            )}
+
+            {!isRunning && !single && (
+              <div className="empty-state">
+                <span className="empty-icon"><Icon name="play" size={24} /></span>
+                <div>
+                  <h3>Your schedule will appear here</h3>
+                  <p>Enter your patients, pick a scheduling policy and run the simulation to see the metrics and the treatment timeline.</p>
                 </div>
-                <PatientField
-                  id={`patient-${patient.id}-arrival`}
-                  label="Arrival time"
-                  hint="time units"
-                  min="0"
-                  value={patient.arrivalTime}
-                  error={getPatientFieldError(patient, "arrivalTime")}
-                  onChange={(event) => updatePatient(index, "arrivalTime", event.target.value)}
-                  onBlur={() => normalizePatientField(index, "arrivalTime")}
-                />
-                <PatientField
-                  id={`patient-${patient.id}-treatment`}
-                  label="Treatment time"
-                  hint="time units"
-                  min="1"
-                  value={patient.treatmentTime}
-                  error={getPatientFieldError(patient, "treatmentTime")}
-                  onChange={(event) => updatePatient(index, "treatmentTime", event.target.value)}
-                  onBlur={() => normalizePatientField(index, "treatmentTime")}
-                />
-                <PatientField
-                  id={`patient-${patient.id}-priority`}
-                  label="Priority"
-                  hint="1–5"
-                  min="1"
-                  max="5"
-                  value={patient.priority}
-                  error={getPatientFieldError(patient, "priority")}
-                  onChange={(event) => updatePatient(index, "priority", event.target.value)}
-                  onBlur={() => normalizePatientField(index, "priority")}
-                />
               </div>
-            ))}
+            )}
           </div>
-          <div className="simulation-toolbar">
-            <div className="toolbar-context">Ready to simulate with the selected policy.</div>
-            <div className="toolbar-actions">
-              <button className="run-button" type="submit" disabled={isLoading} aria-busy={isLoading}>
-                {isLoading && <span className="button-spinner" aria-hidden="true" />}
-                <span>{isLoading ? "Running simulation..." : "Run simulation"}</span>
-              </button>
-              <button className="reset-button" type="button" onClick={resetSimulation} disabled={isLoading}>
-                Reset
-              </button>
-            </div>
-          </div>
-          {error && <p className="error-message" role="alert" aria-live="assertive">{error}</p>}
-        </section>
-      </form>
+        )}
 
-      {result ? (
-        <section className="results">
-          <div className="results-heading">
-            <div>
-              <p className="eyebrow">03 / Latest simulation</p>
-              <h2>{result.metrics.algorithmName}</h2>
-            </div>
-            <span className="result-tag">Latest run · {result.processedPatients.length} patients processed</span>
+        {activeTab === "compare" && (
+          <div role="tabpanel" id="panel-compare" aria-labelledby="tab-compare" className="tab-panel">
+            <ComparePanel
+              patientCount={patients.length}
+              quantum={quantum}
+              onQuantumChange={setQuantum}
+              quantumError={quantumError}
+              comparison={comparison}
+              isStale={compareIsStale}
+              isLoading={isComparing}
+              error={compareError}
+              onCompare={runComparison}
+              inspectedKey={inspectedKey}
+              onInspect={setInspectedKey}
+            />
           </div>
+        )}
+      </main>
 
-          <div className="metrics-grid" aria-label="Simulation summary metrics">
-            {metricDefinitions
-              .filter(({ key }) => isMetricAvailable(result.metrics?.[key]))
-              .map((metric) => (
-                <Metric
-                  key={metric.key}
-                  label={metric.label}
-                  value={result.metrics[metric.key]}
-                  unit={metric.unit}
-                  description={metric.description}
-                />
-              ))}
-          </div>
-
-          <div className="panel patient-results-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Patient breakdown</p>
-                <h2>Individual performance</h2>
-              </div>
-            </div>
-            <div className="results-table-wrap">
-              {result.processedPatients?.length ? (
-                <table className="results-table">
-                  <caption className="sr-only">Per-patient scheduling results</caption>
-                <thead>
-                  <tr>
-                    <th>Patient</th>
-                    <th>Arrival</th>
-                    <th>Treatment</th>
-                    <th>Priority</th>
-                    <th>First start</th>
-                    <th>Completion</th>
-                    <th>Waiting</th>
-                    <th>Turnaround</th>
-                    <th>Response</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...result.processedPatients]
-                    .sort((left, right) => left.id - right.id)
-                    .map((patient) => (
-                      <tr key={patient.id}>
-                        <th scope="row">{formatPatientId(patient.id)}</th>
-                        <td>{formatTableValue(patient.arrivalTime)}</td>
-                        <td>{formatTableValue(patient.treatmentTime)}</td>
-                        <td>{formatTableValue(patient.priority)}</td>
-                        <td>{formatTableValue(patient.firstStartTime)}</td>
-                        <td>{formatTableValue(patient.completionTime)}</td>
-                        <td>{formatTableValue(patient.waitingTime)}</td>
-                        <td>{formatTableValue(patient.turnaroundTime)}</td>
-                        <td>{formatTableValue(getResponseTime(patient))}</td>
-                      </tr>
-                    ))}
-                </tbody>
-                </table>
-              ) : (
-                <div className="table-empty-state">
-                  <strong>No patient results available</strong>
-                  <span>Run a simulation with at least one patient to populate this table.</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="panel gantt-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Timeline</p>
-                <h2>Doctor treatment timeline</h2>
-              </div>
-              <span className="timeline-total">0 — {timelineEnd} time units</span>
-            </div>
-            <p className="chart-helper">
-              One lane represents the single doctor. Repeated patient labels show preemption or time-sliced treatment.
-            </p>
-            <div className="gantt-scroll">
-              <div
-                className="gantt-chart"
-                role="list"
-                aria-label={`Doctor treatment timeline from 0 to ${timelineEnd} time units`}
-                style={{ minWidth: `${Math.max(620, chartSlots.length * 76)}px` }}
-              >
-                {chartSlots.map((slot) => {
-                  const duration = slot.endTime - slot.startTime;
-                  const patientLabel = slot.patientId === null ? "Idle" : `Patient P${slot.patientId}`;
-                  return (
-                    <div
-                      className="gantt-slot"
-                      data-idle={slot.patientId === null}
-                      key={slot.key}
-                      role="listitem"
-                      style={{ flexGrow: slot.width }}
-                      title={`${patientLabel}: ${slot.startTime} to ${slot.endTime} (${duration} time units)`}
-                      aria-label={`${patientLabel}, start ${slot.startTime}, end ${slot.endTime}, duration ${duration} time units`}
-                    >
-                      <strong>{slot.patientId === null ? "Idle" : `P${slot.patientId}`}</strong>
-                      <span>{slot.startTime}–{slot.endTime}</span>
-                      <small>{duration} unit{duration === 1 ? "" : "s"}</small>
-                    </div>
-                  );
-                })}
-              </div>
-              <div
-                className="time-axis"
-                style={{ gridTemplateColumns: `repeat(${Math.max(timelineTicks.length, 1)}, minmax(0, 1fr))` }}
-              >
-                {timelineTicks.map((tick) => <span key={tick}>{tick}</span>)}
-              </div>
-            </div>
-          </div>
-        </section>
-      ) : (
-        <section className="empty-results">
-          <span className="empty-icon" aria-hidden="true">↗</span>
-          <div>
-            <h2>Your schedule will appear here</h2>
-            <p>Enter your patients, select a scheduling algorithm, and run the simulation to see performance metrics and the treatment timeline.</p>
-          </div>
-        </section>
-      )}
-    </main>
-  );
-}
-
-function Metric({ label, value, unit, description }) {
-  return (
-    <div className="metric-card">
-      <span className="metric-label">{label}</span>
-      <strong>{formatMetric(value)}</strong>
-      <span className="metric-unit">{unit}</span>
-      <p>{description}</p>
+      <footer className="footer">ED Scheduler · Operating Systems project · results come from the C++ scheduling backend</footer>
     </div>
   );
-}
-
-function isMetricAvailable(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function formatPatientId(value) {
-  return isMetricAvailable(value) ? `P${value}` : "—";
-}
-
-function formatTableValue(value) {
-  return isMetricAvailable(value) ? formatMetric(value) : "—";
-}
-
-function getResponseTime(patient) {
-  if (!isMetricAvailable(patient.firstStartTime) || !isMetricAvailable(patient.arrivalTime)) {
-    return null;
-  }
-  return patient.firstStartTime - patient.arrivalTime;
-}
-
-function PatientField({ id, label, hint, min, max, value, error, onChange, onBlur }) {
-  return (
-    <div className={`patient-field${error ? " has-error" : ""}`}>
-      <label htmlFor={id}>
-        {label} <span>({hint})</span>
-      </label>
-      <input
-        id={id}
-        type="number"
-        min={min}
-        max={max}
-        value={value}
-        onChange={onChange}
-        onBlur={onBlur}
-        onKeyDown={preventNumberStepping}
-        aria-invalid={Boolean(error)}
-        aria-describedby={error ? `${id}-error` : undefined}
-      />
-      {error && <span className="field-error" id={`${id}-error`}>{error}</span>}
-    </div>
-  );
-}
-
-function preventNumberStepping(event) {
-  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-    event.preventDefault();
-  }
-}
-
-function getPatientFieldError(patient, field) {
-  const value = patient[field];
-  if (!Number.isFinite(value)) return "Enter a number.";
-  if (field === "arrivalTime" && value < 0) return "Use 0 or more.";
-  if (field === "treatmentTime" && value < 1) return "Use at least 1.";
-  if (field === "priority" && (value < 1 || value > 5)) return "Use 1–5.";
-  return "";
-}
-
-function getQuantumError(value) {
-  const numericValue = Number(value);
-  if (!Number.isInteger(numericValue)) return "Enter a whole number.";
-  if (numericValue <= 0) return "Quantum must be greater than zero.";
-  return "";
-}
-
-function formatMetric(value) {
-  return Number(value).toFixed(2);
 }
 
 export default App;
