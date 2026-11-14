@@ -1,7 +1,5 @@
-backend/README.md
 backend/scheduler_server.exe
 .vscode/c_cpp_properties.json
-backend/DOCUMENTATION.md
 frontend/node_modules/
 frontend/dist/
 backend/.obsidian
