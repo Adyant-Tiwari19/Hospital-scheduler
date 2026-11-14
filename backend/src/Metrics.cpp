@@ -4,7 +4,7 @@
 using namespace std;
 
 SimulationMetrics MetricsCalculator::calculate(
-    const string& algoName,
+    string& algoName,
     vector<Patient>& patients,
     vector<TimeSlot>& timeline,
     int totalTime

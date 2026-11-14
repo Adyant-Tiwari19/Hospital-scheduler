@@ -29,7 +29,7 @@ struct SimulationMetrics{
 class MetricsCalculator{
 public:
     static SimulationMetrics calculate(
-        const string& algoName,
+        string& algoName,
         vector<Patient>& patients,
         vector<TimeSlot>& timeline,
         int totalTime
